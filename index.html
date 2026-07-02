@@ -205,15 +205,35 @@
       width: 9px;
       height: 14px;
       border-radius: 3px;
-      opacity: 0.95;
+      opacity: 0.98;
       transform: translate3d(0, 0, 0) rotate(0deg);
+      transform-origin: center;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.12);
       animation: confettiFall 2.4s ease-out forwards;
+    }
+
+    .confetti-burst {
+      position: fixed;
+      left: 50%;
+      top: 28%;
+      transform: translate(-50%, -50%) scale(0.8);
+      font-size: 48px;
+      line-height: 1;
+      animation: confettiPop 1.2s ease-out forwards;
+      filter: drop-shadow(0 8px 14px rgba(0,0,0,0.18));
     }
 
     @keyframes confettiFall {
       0% { transform: translate3d(0, -20px, 0) rotate(0deg); opacity: 1; }
       75% { opacity: 1; }
       100% { transform: translate3d(var(--drift), 105vh, 0) rotate(var(--spin)); opacity: 0; }
+    }
+
+    @keyframes confettiPop {
+      0% { transform: translate(-50%, -50%) scale(0.6); opacity: 0; }
+      15% { transform: translate(-50%, -50%) scale(1.15); opacity: 1; }
+      75% { opacity: 1; }
+      100% { transform: translate(-50%, -70%) scale(0.96); opacity: 0; }
     }
 
     .success, .warning {
@@ -524,6 +544,7 @@
     }
 
     .planned-course .small { font-size: 10.8px; line-height: 1.25; }
+    .print-credits { display: none; }
 
     .planned-course:active { cursor: grabbing; }
 
@@ -633,14 +654,55 @@
     }
 
     @media print {
-      header, .controls, .requirements, .courses-panel, .toolbar, .note, .offerings-panel, .planner-actions { display: none !important; }
-      body { background: white; }
-      .app, .main, .workspace, .side-stack { display: block; padding: 0; }
-      .panel { box-shadow: none; border: 0; }
-      .summary { grid-template-columns: repeat(3, 1fr); }
-      .semester-grid { grid-template-columns: repeat(3, 1fr); }
-      .semester { break-inside: avoid; margin-bottom: 10px; }
-      .print-footer { display: block; }
+      @page { size: Letter landscape; margin: 0.18in; }
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      header, .controls, .requirements, .courses-panel, .toolbar, .note, .offerings-panel, .planner-actions, .term-legend, #successMessage, #overlapMessage, .empty { display: none !important; }
+      html, body { width: 100%; background: white; overflow: visible; }
+      body { line-height: 1.08; }
+      .app, .main, .workspace, .side-stack { display: block !important; max-width: none; padding: 0; margin: 0; overflow: visible; }
+      .panel { box-shadow: none; border: 0; border-radius: 0; background: white; }
+      .summary {
+        position: static !important;
+        display: grid !important;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 4px;
+        margin: 0 0 4px 0;
+        padding: 0;
+      }
+      .stat { padding: 3px 6px; border-radius: 6px; font-size: 7pt; }
+      .stat strong { font-size: 13pt; }
+      .progress-track { height: 4px; margin-top: 3px; }
+      .planner-wrap { display: block !important; }
+      .planner-head { display: block; padding: 0 0 4px 0; border-bottom: 0; }
+      .planner-head h2 { margin: 0; font-size: 12pt; color: #463b83; }
+      .planner-head .small { display: none; }
+      .semester-grid {
+        display: grid !important;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 4px;
+      }
+      .semester {
+        min-height: 0;
+        margin: 0;
+        border-radius: 6px;
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+      .semester-header { position: static; padding: 3px 5px; font-size: 7pt; gap: 4px; }
+      .credits { font-size: 6.5pt; }
+      .drop-zone { padding: 3px; gap: 2px; min-height: 0; }
+      .planned-course {
+        grid-template-columns: 1fr;
+        padding: 2px 3px;
+        border-radius: 4px;
+        font-size: 6.6pt;
+        line-height: 1.05;
+        gap: 0;
+        break-inside: avoid;
+      }
+      .planned-course .x, .planned-course .small, .planned-title, .warn-sign, .course-alert { display: none !important; }
+      .print-credits { display: inline; font-weight: 400; color: #475467; }
+      .print-footer { display: block; font-size: 6.5pt; margin-top: 4px; }
     }
   </style>
 </head>
@@ -1139,6 +1201,7 @@ const OFFERED_CODES = Array.from(new Set([
 let state;
 let summaryHasRendered = false;
 let lastFullyPlanned = false;
+let forceConfettiOnNextSummary = false;
 const $ = id => document.getElementById(id);
 
 function defaultState() {
@@ -1294,29 +1357,53 @@ function isCoreRequirementChecked(item) {
   if (item.id === "CORE MTH") return getDoneCourseCodes().some(code => canSatisfyRequirement(makeOfferedItem(code), item));
   return false;
 }
+function addRepresentedCodesToSet(codes, rawCode) {
+  if (!rawCode) return;
+  if (COURSE_CATALOG[rawCode]) codes.add(rawCode);
+  if (BUNDLES[rawCode]) BUNDLES[rawCode].code.split(" + ").forEach(part => codes.add(part.trim()));
+}
+
+function checkedRequirementCompletionCodes() {
+  // Manual checks mean the requirement is already complete. When a checked requirement
+  // names specific choices, treat those choices as already satisfied for auto-population
+  // and prerequisite planning so the planner does not add duplicate PHL/THL/ENG/etc.
+  const codes = new Set();
+
+  Array.from(getRequirementMap().values()).forEach(req => {
+    if (!state.checked[req.id]) return;
+    if (!isCriteriaRequirement(req)) addRepresentedCodesToSet(codes, req.code);
+    else if (req.criteria?.choices) req.criteria.choices.forEach(code => addRepresentedCodesToSet(codes, code));
+  });
+
+  CORE.map(makeCoreItem).forEach(req => {
+    if (!req || !state.checkedCore[req.id]) return;
+    if (!isCriteriaRequirement(req)) addRepresentedCodesToSet(codes, req.code);
+    else if (req.criteria?.choices) req.criteria.choices.forEach(code => addRepresentedCodesToSet(codes, code));
+  });
+
+  return Array.from(codes);
+}
+
 function getDoneCourseCodes() {
   const codes = new Set();
-  Object.entries(state.checked || {}).forEach(([id, checked]) => { if (checked && COURSE_CATALOG[id]) codes.add(id); });
+  Object.entries(state.checked || {}).forEach(([id, checked]) => { if (checked) addRepresentedCodesToSet(codes, id); });
+  checkedRequirementCompletionCodes().forEach(code => addRepresentedCodesToSet(codes, code));
   Object.entries(state.checkedCourses || {}).forEach(([id, checked]) => {
     if (!checked) return;
     const code = isOfferedCourseId(id) ? offeredCodeFromId(id) : id;
-    if (COURSE_CATALOG[code]) codes.add(code);
-    if (BUNDLES[code]) BUNDLES[code].code.split(" + ").forEach(part => codes.add(part.trim()));
+    addRepresentedCodesToSet(codes, code);
   });
   Object.values(state.planned || {}).flat().forEach(id => {
     const code = isOfferedCourseId(id) ? offeredCodeFromId(id) : id;
-    if (COURSE_CATALOG[code]) codes.add(code);
-    if (BUNDLES[code]) BUNDLES[code].code.split(" + ").forEach(part => codes.add(part.trim()));
+    addRepresentedCodesToSet(codes, code);
   });
   Object.values(state.satisfied || {}).forEach(id => {
     const code = isOfferedCourseId(id) ? offeredCodeFromId(id) : id;
-    if (COURSE_CATALOG[code]) codes.add(code);
-    if (BUNDLES[code]) BUNDLES[code].code.split(" + ").forEach(part => codes.add(part.trim()));
+    addRepresentedCodesToSet(codes, code);
   });
   Object.values(state.satisfiedCore || {}).forEach(id => {
     const code = isOfferedCourseId(id) ? offeredCodeFromId(id) : id;
-    if (COURSE_CATALOG[code]) codes.add(code);
-    if (BUNDLES[code]) BUNDLES[code].code.split(" + ").forEach(part => codes.add(part.trim()));
+    addRepresentedCodesToSet(codes, code);
   });
   return Array.from(codes);
 }
@@ -1539,6 +1626,7 @@ function completionIndexMap(plan = state.planned) {
     if (!map.has(code) || idx < map.get(code)) map.set(code, idx);
   };
   placementCompletedCodes().forEach(code => setIndex(code, -1));
+  checkedRequirementCompletionCodes().forEach(code => setIndex(code, -1));
   Object.entries(plan || {}).forEach(([key, list]) => {
     const idx = terms.indexOf(key);
     if (idx < 0) return;
@@ -1548,7 +1636,7 @@ function completionIndexMap(plan = state.planned) {
     if (checked) representedRawCodes(id).forEach(code => setIndex(code, -1));
   });
   Object.entries(state.checked || {}).forEach(([id, checked]) => {
-    if (checked && (COURSE_CATALOG[id] || BUNDLES[id])) representedRawCodes(id).forEach(code => setIndex(code, -1));
+    if (checked) representedRawCodes(id).forEach(code => setIndex(code, -1));
   });
   Object.values(state.satisfied || {}).forEach(id => representedRawCodes(id).forEach(code => { if (!map.has(code)) setIndex(code, -1); }));
   Object.values(state.satisfiedCore || {}).forEach(id => representedRawCodes(id).forEach(code => { if (!map.has(code)) setIndex(code, -1); }));
@@ -2117,6 +2205,55 @@ function strictCoreqsCompatibleWithAutoTerm(rawCode, term) {
   });
 }
 
+function coreqCompanionsForTerm(rawCode, semesterKey) {
+  // Returns the extra same-term courses needed for rawCode's coreq groups.
+  // Returns null if the coreq requirement cannot be satisfied in this term.
+  const term = parseTerm(semesterKey).term;
+  const terms = generateTerms(state.grad);
+  const currentIdx = terms.indexOf(semesterKey);
+  if (currentIdx < 0) return null;
+  const map = completionIndexMap();
+  const companions = [];
+  const companionSet = new Set();
+
+  for (const group of getCoreqGroups(rawCode)) {
+    const alreadySatisfied = group.some(code => {
+      const idx = completionIndexForNeeded(code, map);
+      return idx !== undefined && idx <= currentIdx;
+    });
+    if (alreadySatisfied) continue;
+
+    const candidate = group
+      .filter(code => COURSE_CATALOG[code] || BUNDLES[code])
+      .filter(code => !isRawDone(code) && !isRawPlanned(code) && !isPlacementSatisfied(code))
+      .filter(code => canAutoScheduleRawInTerm(code, term))
+      .filter(code => relationGroupsSatisfiedForTerm(code, semesterKey, "prereq"))
+      .sort((a, b) => candidatePreferenceScore(a, null) - candidatePreferenceScore(b, null))[0];
+
+    if (!candidate) return null;
+    if (!companionSet.has(candidate)) {
+      companionSet.add(candidate);
+      companions.push(candidate);
+    }
+  }
+
+  return companions;
+}
+
+function projectedCreditsIfRawPlaced(rawCode, semesterKey) {
+  const companions = coreqCompanionsForTerm(rawCode, semesterKey);
+  if (companions === null) return Infinity;
+  return semesterCredits(semesterKey) + (courseInfo(rawCode).credits || 0) + companions.reduce((sum, code) => sum + (courseInfo(code).credits || 0), 0);
+}
+
+function rawCanBeAutoPlacedInTerm(rawCode, semesterKey) {
+  const term = parseTerm(semesterKey).term;
+  if (!canAutoScheduleRawInTerm(rawCode, term)) return false;
+  if (!relationGroupsSatisfiedForTerm(rawCode, semesterKey, "prereq")) return false;
+  const projected = projectedCreditsIfRawPlaced(rawCode, semesterKey);
+  return Number.isFinite(projected) && projected <= semesterLimit(semesterKey);
+}
+
 function expandWithPrereqs(rawCodes) {
   const out = [];
   const seen = new Set();
@@ -2138,14 +2275,15 @@ function expandWithPrereqs(rawCodes) {
 function existingScheduledIndexes(activeTerms) {
   const indexes = new Map();
   placementCompletedCodes().forEach(code => indexes.set(code, -1));
+  checkedRequirementCompletionCodes().forEach(code => indexes.set(code, -1));
   activeTerms.forEach((term, idx) => {
-    (state.planned[term] || []).forEach(id => indexes.set(rawCodeFromAnyId(id), idx));
+    (state.planned[term] || []).forEach(id => representedRawCodes(id).forEach(code => indexes.set(code, idx)));
   });
   Object.entries(state.checkedCourses || {}).forEach(([id, checked]) => {
-    if (checked) indexes.set(rawCodeFromAnyId(id), -1);
+    if (checked) representedRawCodes(id).forEach(code => indexes.set(code, -1));
   });
   Object.entries(state.checked || {}).forEach(([id, checked]) => {
-    if (checked) indexes.set(id, -1);
+    if (checked) representedRawCodes(id).forEach(code => indexes.set(code, -1));
   });
   return indexes;
 }
@@ -2173,13 +2311,12 @@ function chooseSemesterForRaw(rawCode, activeTerms, scheduledIndexes, targetCred
 
   const candidates = activeTerms.map((key, idx) => ({ key, idx, term: parseTerm(key).term, credits: semesterCredits(key) }))
     .filter(x => x.idx >= earliest)
-    .filter(x => canAutoScheduleRawInTerm(rawCode, x.term))
-    .filter(x => strictCoreqsCompatibleWithAutoTerm(rawCode, x.term));
+    .filter(x => rawCanBeAutoPlacedInTerm(rawCode, x.key));
   if (!candidates.length) return null;
 
   const scored = candidates.map(x => {
     const limit = semesterLimit(x.key);
-    const after = x.credits + credits;
+    const after = projectedCreditsIfRawPlaced(rawCode, x.key);
     const overLimit = after > limit;
     const typicalPenalty = typical.length && !typical.includes(x.term) ? 35 : 0;
     const overPenalty = overLimit ? 10000 + (after - limit) * 100 : 0;
@@ -2228,14 +2365,26 @@ function addStrictCoreqsInSameTerm(rawCode, target, scheduledIndexes, activeTerm
   });
 }
 
+function addNeededCoreqsInSameTerm(rawCode, target, scheduledIndexes, activeTerms, seen = new Set()) {
+  if (!target || seen.has(rawCode)) return;
+  seen.add(rawCode);
+  const companions = coreqCompanionsForTerm(rawCode, target) || [];
+  companions.forEach(coreq => {
+    if (isRawDone(coreq) || isRawPlanned(coreq) || isPlacementSatisfied(coreq)) return;
+    if (!rawCanBeAutoPlacedInTerm(coreq, target) && !relationGroupsSatisfiedForTerm(coreq, target, "prereq")) return;
+    addRawToTermIfPossible(coreq, target, scheduledIndexes, activeTerms);
+    addNeededCoreqsInSameTerm(coreq, target, scheduledIndexes, activeTerms, seen);
+  });
+}
+
 function placeRawSequence(rawCodes, activeTerms, scheduledIndexes, targetCredits, skipped, stage = "general") {
   orderedUnique(rawCodes).forEach(rawCode => {
     if (!rawCode || isRawDone(rawCode) || isRawPlanned(rawCode) || isPlacementSatisfied(rawCode)) return;
     const target = chooseSemesterForRaw(rawCode, activeTerms, scheduledIndexes, targetCredits, { stage });
     if (!target) { skipped.add(rawCode); return; }
-    addStrictCoreqsInSameTerm(rawCode, target, scheduledIndexes, activeTerms);
+    addNeededCoreqsInSameTerm(rawCode, target, scheduledIndexes, activeTerms);
     addRawToTermIfPossible(rawCode, target, scheduledIndexes, activeTerms);
-    addStrictCoreqsInSameTerm(rawCode, target, scheduledIndexes, activeTerms);
+    addNeededCoreqsInSameTerm(rawCode, target, scheduledIndexes, activeTerms);
   });
 }
 
@@ -2271,7 +2420,7 @@ function repairSortScore(rawCode) {
 function repairInvalidAutoPlacements(activeTerms, targetCredits, skipped) {
   // After the initial population, move any auto-scheduled course that still has a term or prereq/coreq warning.
   // This also improves plans that already had manually placed courses before the Populate button was clicked.
-  for (let pass = 0; pass < 4; pass++) {
+  for (let pass = 0; pass < 10; pass++) {
     const invalid = invalidPlannedEntries(activeTerms);
     if (!invalid.length) return;
     const rawCodes = orderedUnique(invalid.map(entry => entry.rawCode));
@@ -2330,21 +2479,8 @@ function fillerCandidateValidForTerm(rawCode, semesterKey) {
   if (isRawDone(rawCode) || isRawPlanned(rawCode) || isPlacementSatisfied(rawCode)) return false;
   if (!codeAppearsInFallSpringOfferings(rawCode)) return false;
   const term = parseTerm(semesterKey).term;
-  if (!canAutoScheduleRawInTerm(rawCode, term)) return false;
-  if (!relationGroupsSatisfiedForTerm(rawCode, semesterKey, "prereq")) return false;
-
-  const coreqGroups = getCoreqGroups(rawCode);
-  const terms = generateTerms(state.grad);
-  const idx = terms.indexOf(semesterKey);
-  const map = completionIndexMap();
-  for (const group of coreqGroups) {
-    if (groupSatisfiedByIndex(group, idx, map, "coreq")) continue;
-    if (group.length !== 1) return false;
-    const coreq = group[0];
-    if (!canUseStrictCoreqAsFillerCompanion(coreq, semesterKey)) return false;
-  }
-
-  const after = semesterCredits(semesterKey) + fillerCreditsNeededForTerm(rawCode, semesterKey);
+  if (!rawCanBeAutoPlacedInTerm(rawCode, semesterKey)) return false;
+  const after = projectedCreditsIfRawPlaced(rawCode, semesterKey);
   return after <= semesterLimit(semesterKey);
 }
 
@@ -2363,10 +2499,10 @@ function fillerCandidateScore(rawCode, semesterKey) {
 }
 
 function addFillerRawToTerm(rawCode, semesterKey, scheduledIndexes, activeTerms) {
-  const term = parseTerm(semesterKey).term;
-  const coreqs = strictCoreqsNeededForTerm(rawCode, term);
-  coreqs.forEach(coreq => addRawToTermIfPossible(coreq, semesterKey, scheduledIndexes, activeTerms));
-  return addRawToTermIfPossible(rawCode, semesterKey, scheduledIndexes, activeTerms);
+  addNeededCoreqsInSameTerm(rawCode, semesterKey, scheduledIndexes, activeTerms);
+  const placed = addRawToTermIfPossible(rawCode, semesterKey, scheduledIndexes, activeTerms);
+  addNeededCoreqsInSameTerm(rawCode, semesterKey, scheduledIndexes, activeTerms);
+  return placed;
 }
 
 function fillRemainingCreditsTo120(activeTerms, skipped) {
@@ -2453,6 +2589,7 @@ function populateAllUnchecked() {
 
   // 7. One final cleanup pass catches requirements satisfied by newly placed courses.
   reconcileSatisfiedRequirements();
+  forceConfettiOnNextSummary = true;
   saveState();
   renderAll(false);
   if (skipped.size) {
@@ -2504,7 +2641,7 @@ function renderPlanner() {
       const satisfiesProgram = matchedReqs.map(([reqId]) => getRequirementMap().get(reqId)?.title || "a program requirement");
       const satisfiesCore = matchedCoreReqs.map(([reqId]) => makeCoreItem(CORE.find(c => c[0] === reqId))?.title || "a core requirement");
       const satisfiesNote = [...satisfiesProgram, ...satisfiesCore].length ? `<div class="small">fills ${[...satisfiesProgram, ...satisfiesCore].join("; ")}</div>` : "";
-      planned.innerHTML = `<div><strong>${item.code}</strong>${warningBadge}${reqWarningBadge}: ${item.title}<div class="small">${item.credits} credit${item.credits === 1 ? "" : "s"}</div>${satisfiesNote}${offcycleNote}${reqWarningNote}</div><button class="x" title="Remove ${item.code}" aria-label="Remove ${item.code}">×</button>`;
+      planned.innerHTML = `<div><strong>${item.code}</strong><span class="print-credits"> (${item.credits})</span>${warningBadge}${reqWarningBadge}<span class="planned-title">: ${item.title}</span><div class="small">${item.credits} credit${item.credits === 1 ? "" : "s"}</div>${satisfiesNote}${offcycleNote}${reqWarningNote}</div><button class="x" title="Remove ${item.code}" aria-label="Remove ${item.code}">×</button>`;
       planned.querySelector(".x").addEventListener("click", () => removeCourseFromSemester(id, key));
       zone.appendChild(planned);
     });
@@ -2650,7 +2787,6 @@ function majorOverlapStatus() {
 
 
 function triggerConfetti() {
-  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   let layer = $("confettiLayer");
   if (!layer) {
     layer = document.createElement("div");
@@ -2659,6 +2795,10 @@ function triggerConfetti() {
     document.body.appendChild(layer);
   }
   layer.innerHTML = "";
+  const burst = document.createElement("div");
+  burst.className = "confetti-burst";
+  burst.textContent = "🎉";
+  layer.appendChild(burst);
   const colors = ["#5f4bb6", "#f6ad55", "#68d391", "#f6e05e", "#b794f4", "#fc8181"];
   const count = 90;
   for (let i = 0; i < count; i++) {
@@ -2702,7 +2842,8 @@ function renderSummary() {
 
   const fullyPlanned = !!(reqs.length && programLeft === 0 && coreLeft === 0 && creditsLeft === 0 && overlap.ok);
   $("successMessage").classList.toggle("hidden", !fullyPlanned);
-  if (summaryHasRendered && fullyPlanned && !lastFullyPlanned) triggerConfetti();
+  if (fullyPlanned && ((summaryHasRendered && !lastFullyPlanned) || forceConfettiOnNextSummary)) triggerConfetti();
+  forceConfettiOnNextSummary = false;
   lastFullyPlanned = fullyPlanned;
   summaryHasRendered = true;
 }
@@ -2770,6 +2911,7 @@ function setupEvents() {
     state = defaultState();
     summaryHasRendered = false;
     lastFullyPlanned = false;
+    forceConfettiOnNextSummary = false;
     initialize();
   });
   renderTabs();
