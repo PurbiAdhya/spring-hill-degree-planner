@@ -257,6 +257,13 @@
       color: #7a3e00;
     }
 
+    .top-warning {
+      position: sticky;
+      top: 78px;
+      z-index: 69;
+      box-shadow: 0 10px 22px rgba(122, 62, 0, 0.10);
+    }
+
     .workspace {
       display: grid;
       grid-template-columns: minmax(230px, 1fr) minmax(620px, 2fr) minmax(260px, 1fr);
@@ -770,7 +777,8 @@
         <div class="stat"><strong id="coreLeft">0</strong><span>core courses left</span><div class="progress-track"><div class="progress-fill" id="coreProgress"></div></div></div>
         <div class="stat"><strong id="creditsLeft">120</strong><span>credits left to 120</span><div class="progress-track"><div class="progress-fill" id="creditProgress"></div></div></div>
       </section>
-      <div id="successMessage" class="success hidden">🎉 Your degree is fully planned. Please review it with your advisor.</div>
+      <div id="plannerWarnings" class="warning top-warning hidden"></div>
+      <div id="successMessage" class="success hidden">Your degree planning is a success. Please review it with your advisor.</div>
       <div id="overlapMessage" class="warning hidden"></div>
 
       <section class="workspace">
@@ -779,6 +787,9 @@
             <h2>Checklist: Core</h2>
             <div id="corePanel">
               <div class="small" style="margin-bottom:10px;">Core requirements are satisfied by completed, checked, or planned eligible courses.</div>
+              <div class="checklist-tools core-only-tool">
+                <button type="button" id="coreUncheckedOnly" class="filter-button" aria-pressed="false">Show unchecked only</button>
+              </div>
               <div class="course-list" id="coreList"></div>
             </div>
           </aside>
@@ -1202,6 +1213,8 @@ let state;
 let summaryHasRendered = false;
 let lastFullyPlanned = false;
 let forceConfettiOnNextSummary = false;
+let lastConfettiAt = 0;
+let autoPopulateAllowSummer = false;
 const $ = id => document.getElementById(id);
 
 function defaultState() {
@@ -1821,7 +1834,7 @@ function renderRequirementList() {
   CORE.forEach(c => {
     const item = makeCoreItem(c);
     const checked = isCoreRequirementChecked(item);
-    appendCard(coreList, item, checked, { core: true, draggable: false, checkable: true, dropTarget: true });
+    appendCard(coreList, item, checked, { core: true, draggable: false, checkable: true, dropTarget: true, hideCompletedId: "coreUncheckedOnly" });
   });
 }
 
@@ -2188,6 +2201,9 @@ function getStrictCoreqCodesForScheduling(rawCode) {
 
 function autoAllowedTermsForRaw(rawCode) {
   const terms = getOfferingTerms(offeredCourseId(rawCode));
+  if (autoPopulateAllowSummer) {
+    return terms.length ? terms : ["Fall", "Spring", "Summer"];
+  }
   const fallSpringTerms = terms.filter(term => term === "Fall" || term === "Spring");
   if (fallSpringTerms.length) return fallSpringTerms;
   if (terms.length) return [];
@@ -2420,7 +2436,7 @@ function repairSortScore(rawCode) {
 function repairInvalidAutoPlacements(activeTerms, targetCredits, skipped) {
   // After the initial population, move any auto-scheduled course that still has a term or prereq/coreq warning.
   // This also improves plans that already had manually placed courses before the Populate button was clicked.
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < 35; pass++) {
     const invalid = invalidPlannedEntries(activeTerms);
     if (!invalid.length) return;
     const rawCodes = orderedUnique(invalid.map(entry => entry.rawCode));
@@ -2432,6 +2448,18 @@ function repairInvalidAutoPlacements(activeTerms, targetCredits, skipped) {
     const scheduledIndexes = existingScheduledIndexes(activeTerms);
     placeRawSequence(nonSeminarCodes(repairCodes), activeTerms, scheduledIndexes, targetCredits, skipped, "repair");
     placeRawSequence(seminarCodes(repairCodes), activeTerms, scheduledIndexes, 15, skipped, "seminar");
+  }
+}
+
+function repairUntilWarningsClear(activeTerms, allTerms, targetCredits, skipped) {
+  autoPopulateAllowSummer = false;
+  repairInvalidAutoPlacements(activeTerms, targetCredits, skipped);
+
+  // If Fall/Spring cannot resolve every warning, allow Summer as a last-resort repair space.
+  if (invalidPlannedEntries(allTerms).length) {
+    autoPopulateAllowSummer = true;
+    repairInvalidAutoPlacements(allTerms, targetCredits, skipped);
+    autoPopulateAllowSummer = false;
   }
 }
 
@@ -2477,7 +2505,7 @@ function fillerCandidateValidForTerm(rawCode, semesterKey) {
   if (!info || !info.credits || info.credits <= 0) return false;
   if (SEMINAR_COURSES.includes(rawCode)) return false;
   if (isRawDone(rawCode) || isRawPlanned(rawCode) || isPlacementSatisfied(rawCode)) return false;
-  if (!codeAppearsInFallSpringOfferings(rawCode)) return false;
+  if (!autoPopulateAllowSummer && !codeAppearsInFallSpringOfferings(rawCode)) return false;
   const term = parseTerm(semesterKey).term;
   if (!rawCanBeAutoPlacedInTerm(rawCode, semesterKey)) return false;
   const after = projectedCreditsIfRawPlaced(rawCode, semesterKey);
@@ -2537,7 +2565,10 @@ function fillRemainingCreditsTo120(activeTerms, skipped) {
 }
 
 function populateAllUnchecked() {
-  // Auto-population intentionally skips Summer. Students may still drag courses into Summer manually.
+  const planningAidMessage = "This is a planning aid only. Real course offerings, seats, prerequisites, and degree-audit details may differ. Class planning should be reviewed every semester when the semester schedule is released, and all plans should be verified by the student's advisor.";
+  if (!confirm(planningAidMessage + "\n\nContinue with auto-populate?")) return;
+
+  // Auto-population starts with Fall/Spring. Summer is used only as a last resort if warnings cannot be repaired otherwise.
   const allTerms = generateTerms(state.grad);
   const activeTerms = allTerms.filter(key => parseTerm(key).term !== "Summer");
   activeTerms.forEach(key => { if (!state.planned[key]) state.planned[key] = []; });
@@ -2579,16 +2610,26 @@ function populateAllUnchecked() {
 
   // 5. Repair any course that still violates term offering, prerequisite, or corequisite rules.
   targetCredits = calculateTargetCredits(activeTerms, collectNeededRawCourses());
-  repairInvalidAutoPlacements(activeTerms, targetCredits, skipped);
+  repairUntilWarningsClear(activeTerms, allTerms, targetCredits, skipped);
 
   // 6. If requirements are planned but the total is still below 120 credits, add easier extra courses
-  // to the lightest Fall/Spring semesters first.
+  // to the lightest Fall/Spring semesters first. If Fall/Spring cannot reach 120, use Summer as needed.
   reconcileSatisfiedRequirements();
   fillRemainingCreditsTo120(activeTerms, skipped);
-  repairInvalidAutoPlacements(activeTerms, calculateTargetCredits(activeTerms, collectNeededRawCourses()), skipped);
+  if (completedCreditTotal() < DEGREE_MIN_CREDITS) {
+    autoPopulateAllowSummer = true;
+    fillRemainingCreditsTo120(allTerms, skipped);
+    autoPopulateAllowSummer = false;
+    if (completedCreditTotal() >= DEGREE_MIN_CREDITS) skipped.delete(`additional credits to reach ${DEGREE_MIN_CREDITS}`);
+  }
+  repairUntilWarningsClear(activeTerms, allTerms, calculateTargetCredits(activeTerms, collectNeededRawCourses()), skipped);
 
   // 7. One final cleanup pass catches requirements satisfied by newly placed courses.
   reconcileSatisfiedRequirements();
+  Array.from(skipped).forEach(code => {
+    if (isRawDone(code) || isRawPlanned(code) || isPlacementSatisfied(code)) skipped.delete(code);
+  });
+  if (completedCreditTotal() >= DEGREE_MIN_CREDITS) skipped.delete(`additional credits to reach ${DEGREE_MIN_CREDITS}`);
   forceConfettiOnNextSummary = true;
   saveState();
   renderAll(false);
@@ -2786,6 +2827,50 @@ function majorOverlapStatus() {
 }
 
 
+function collectPlannerWarnings() {
+  const warnings = [];
+  const all = getAllCourseById();
+  const terms = generateTerms(state.grad);
+
+  terms.forEach(key => {
+    const credits = semesterCredits(key);
+    const term = parseTerm(key).term;
+    const limit = semesterLimit(key);
+    if (credits > limit) warnings.push(`${key}: ${credits} credits exceeds the ${limit}-credit limit.`);
+    if (term !== "Summer" && credits > 0 && credits < 12) warnings.push(`${key}: ${credits} credits is below the 12-credit scholarship minimum.`);
+
+    (state.planned[key] || []).forEach(id => {
+      const item = all.get(id);
+      if (!item) return;
+      if (isOffCycle(id, key)) {
+        const offered = getOfferingTerms(id).join("/") || "another term";
+        warnings.push(`${key}: ${item.code} is typically offered in ${offered}.`);
+      }
+      prereqCoreqWarningsForPlanned(id, key).forEach(msg => warnings.push(`${key}: ${item.code} — ${msg}.`));
+    });
+  });
+
+  const overlap = majorOverlapStatus();
+  if (overlap.required && !overlap.ok) warnings.push(`Double-major distinct-credit check needs attention: ${overlap.messages.join(" ")}`);
+  return warnings;
+}
+
+function renderPlannerWarnings() {
+  const box = $("plannerWarnings");
+  if (!box) return [];
+  const warnings = collectPlannerWarnings();
+  if (!warnings.length) {
+    box.classList.add("hidden");
+    box.textContent = "";
+    return warnings;
+  }
+  const shown = warnings.slice(0, 6);
+  const extra = warnings.length > shown.length ? ` ${warnings.length - shown.length} more warning${warnings.length - shown.length === 1 ? "" : "s"}.` : "";
+  box.classList.remove("hidden");
+  box.textContent = `Planner warnings: ${shown.join(" • ")}${extra}`;
+  return warnings;
+}
+
 function triggerConfetti() {
   let layer = $("confettiLayer");
   if (!layer) {
@@ -2840,9 +2925,17 @@ function renderSummary() {
     overlapBox.textContent = "";
   }
 
-  const fullyPlanned = !!(reqs.length && programLeft === 0 && coreLeft === 0 && creditsLeft === 0 && overlap.ok);
+  const plannerWarnings = renderPlannerWarnings();
+
+  const fullyPlanned = !!(reqs.length && programLeft === 0 && coreLeft === 0 && creditsLeft === 0 && overlap.ok && plannerWarnings.length === 0);
   $("successMessage").classList.toggle("hidden", !fullyPlanned);
-  if (fullyPlanned && ((summaryHasRendered && !lastFullyPlanned) || forceConfettiOnNextSummary)) triggerConfetti();
+  if (fullyPlanned) {
+    const now = Date.now();
+    if (forceConfettiOnNextSummary || !lastFullyPlanned || now - lastConfettiAt > 1800) {
+      triggerConfetti();
+      lastConfettiAt = now;
+    }
+  }
   forceConfettiOnNextSummary = false;
   lastFullyPlanned = fullyPlanned;
   summaryHasRendered = true;
@@ -2892,6 +2985,13 @@ function setupEvents() {
     e.currentTarget.textContent = pressed ? "Show unchecked only" : "Show all program requirements";
     renderRequirementList();
   });
+  $("coreUncheckedOnly").addEventListener("click", e => {
+    const pressed = e.currentTarget.getAttribute("aria-pressed") === "true";
+    e.currentTarget.setAttribute("aria-pressed", String(!pressed));
+    e.currentTarget.classList.toggle("active", !pressed);
+    e.currentTarget.textContent = pressed ? "Show unchecked only" : "Show all core requirements";
+    renderRequirementList();
+  });
   $("courseSearch").addEventListener("input", () => renderCourseBank());
   $("hideCompletedCourses").addEventListener("change", () => renderCourseBank());
   $("populateBtn").addEventListener("click", populateAllUnchecked);
@@ -2912,6 +3012,7 @@ function setupEvents() {
     summaryHasRendered = false;
     lastFullyPlanned = false;
     forceConfettiOnNextSummary = false;
+    lastConfettiAt = 0;
     initialize();
   });
   renderTabs();
